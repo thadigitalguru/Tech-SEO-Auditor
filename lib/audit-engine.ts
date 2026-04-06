@@ -16,13 +16,20 @@ export interface CrawledPage {
   title: string
   status: number
   links: string[]
+  facts?: PageFacts
 }
 
 export interface CrawlResult {
   startUrl: string
   sitemapUrls: string[]
   discoveredUrls: string[]
+  failedUrls?: string[]
+  redirectedUrls?: Array<{
+    from: string
+    to: string
+  }>
   pages: CrawledPage[]
+  robotsTxt?: string | null
 }
 
 export interface LighthouseScores {
@@ -52,6 +59,31 @@ export interface AuditPriority {
   reason: string
 }
 
+export type AuditSignalStatus = 'pass' | 'warn' | 'fail'
+
+export interface AuditSignal {
+  key: string
+  label: string
+  status: AuditSignalStatus
+  detail: string
+}
+
+interface PageFacts {
+  hasViewportMeta: boolean
+  jsonLdCount: number
+  hreflangCount: number
+  canonicalHref: string | null
+  metaDescription: string | null
+  openGraphTitle: string | null
+  openGraphDescription: string | null
+  twitterCard: string | null
+  h1Count: number
+  headingLevels: number[]
+  imageCount: number
+  missingAltCount: number
+  noindex: boolean
+}
+
 export interface AuditSummary {
   source: 'heuristic' | 'openai'
   headline: string
@@ -64,6 +96,7 @@ export interface AuditReport {
   crawl: CrawlResult
   lighthouse: LighthouseAudit
   summary: AuditSummary
+  signals?: AuditSignal[]
   generatedAt: string
 }
 
@@ -88,6 +121,7 @@ export function createAuditSite(dependencies: Partial<AuditDependencies> = {}) {
     const targetUrl = normalizeTargetUrl(url)
     const crawl = await resolved.crawlSite(targetUrl.href, options)
     const lighthouseResult = await resolved.runLighthouseAudit(targetUrl.href, options)
+    const signals = buildAuditSignals(crawl)
     const summary = await resolved.summarizeAudit(
       {
         targetUrl: targetUrl.href,
@@ -102,12 +136,87 @@ export function createAuditSite(dependencies: Partial<AuditDependencies> = {}) {
       crawl,
       lighthouse: lighthouseResult,
       summary,
+      signals,
       generatedAt: new Date().toISOString(),
     }
   }
 }
 
 export const auditSite = createAuditSite()
+
+export function createMockAuditReport(url: string): AuditReport {
+  const targetUrl = normalizeTargetUrl(url)
+  const seed = hashString(targetUrl.href)
+  const hostLabel = targetUrl.hostname.replace(/^www\./, '')
+  const scores = {
+    performance: 68 + (seed % 15),
+    accessibility: 82 + (seed % 11),
+    bestPractices: 84 + (seed % 9),
+    seo: 76 + (seed % 13),
+  }
+
+  const crawl: CrawlResult = {
+    startUrl: targetUrl.href,
+    sitemapUrls: [`${targetUrl.origin}/sitemap.xml`],
+    discoveredUrls: [`${targetUrl.origin}/about`],
+    failedUrls: [],
+    redirectedUrls: [],
+    robotsTxt: ['User-agent: *', 'Allow: /', '', 'User-agent: GPTBot', 'Allow: /'].join('\n'),
+    pages: [
+      {
+        url: targetUrl.href,
+        title: `${hostLabel} landing page for technical SEO review`,
+        status: 200,
+        links: [`${targetUrl.origin}/about`],
+        facts: {
+          hasViewportMeta: true,
+          metaDescription: `Audit-ready landing page for ${hostLabel} with concise metadata and technical SEO defaults.`,
+          openGraphTitle: `${hostLabel} technical SEO audit`,
+          openGraphDescription: `Audit-ready landing page for ${hostLabel} with concise metadata and technical SEO defaults.`,
+          twitterCard: 'summary_large_image',
+          jsonLdCount: 1,
+          hreflangCount: 1,
+          canonicalHref: targetUrl.href,
+          h1Count: 1,
+          headingLevels: [1, 2],
+          imageCount: 2,
+          missingAltCount: 0,
+          noindex: false,
+        },
+      },
+    ],
+  }
+
+  const lighthouse: LighthouseAudit = {
+    url: targetUrl.href,
+    scores,
+    metrics: {
+      lcp: 1800 + (seed % 700),
+      cls: Number(((seed % 10) / 100).toFixed(2)),
+      inp: 120 + (seed % 90),
+      tbt: 80 + (seed % 160),
+    },
+    opportunities: [
+      'Reduce unused JavaScript',
+      'Serve images in next-gen formats',
+      'Minimize main-thread work',
+    ].slice(0, 2 + (seed % 2)),
+  }
+
+  return {
+    targetUrl: targetUrl.href,
+    crawl,
+    lighthouse,
+    summary: {
+      source: 'heuristic',
+      headline: getWeakestAreaHeadline(scores),
+      summary: `Mock audit for ${targetUrl.href} completed with performance ${scores.performance}, accessibility ${scores.accessibility}, best practices ${scores.bestPractices}, and SEO ${scores.seo}.`,
+      priorities: buildMockPriorities(scores, lighthouse.opportunities),
+    },
+    signals: buildAuditSignals(crawl),
+    generatedAt: new Date().toISOString(),
+  }
+}
 
 export async function crawlSite(url: string, options: AuditOptions = {}): Promise<CrawlResult> {
   const targetUrl = normalizeTargetUrl(url)
@@ -116,8 +225,10 @@ export async function crawlSite(url: string, options: AuditOptions = {}): Promis
   const queue: string[] = [targetUrl.href]
   const seen = new Set<string>()
   const discovered = new Set<string>()
+  const failedUrls: string[] = []
+  const redirectedUrls: CrawlResult['redirectedUrls'] = []
   const pages: CrawledPage[] = []
-  const { sitemapUrls, pageUrls } = await collectSitemapUrls(targetUrl, timeoutMs)
+  const { sitemapUrls, pageUrls, robotsTxt } = await collectSitemapUrls(targetUrl, timeoutMs)
 
   for (const pageUrl of pageUrls) {
     queue.push(pageUrl)
@@ -134,10 +245,19 @@ export async function crawlSite(url: string, options: AuditOptions = {}): Promis
 
     const response = await fetchText(currentUrl, timeoutMs)
     if (!response.ok || !response.body) {
+      failedUrls.push(currentUrl)
       continue
     }
 
-    const page = parseHtmlPage(currentUrl, response.body, response.status)
+    const finalUrl = response.finalUrl ?? currentUrl
+    if (finalUrl !== currentUrl) {
+      redirectedUrls.push({
+        from: currentUrl,
+        to: finalUrl,
+      })
+    }
+
+    const page = parseHtmlPage(finalUrl, response.body, response.status)
     pages.push(page)
 
     for (const link of page.links) {
@@ -155,7 +275,10 @@ export async function crawlSite(url: string, options: AuditOptions = {}): Promis
     startUrl: targetUrl.href,
     sitemapUrls,
     discoveredUrls: Array.from(discovered),
+    failedUrls,
+    redirectedUrls,
     pages,
+    robotsTxt,
   }
 }
 
@@ -251,7 +374,7 @@ async function loadPlaywright() {
   return await playwrightLoader
 }
 
-async function collectSitemapUrls(targetUrl: URL, timeoutMs: number): Promise<{ sitemapUrls: string[]; pageUrls: string[] }> {
+async function collectSitemapUrls(targetUrl: URL, timeoutMs: number): Promise<{ sitemapUrls: string[]; pageUrls: string[]; robotsTxt: string | null }> {
   const sitemapCandidates = [
     new URL('/sitemap.xml', targetUrl).href,
     new URL('/sitemap_index.xml', targetUrl).href,
@@ -259,8 +382,10 @@ async function collectSitemapUrls(targetUrl: URL, timeoutMs: number): Promise<{ 
 
   const robotsUrl = new URL('/robots.txt', targetUrl).href
   const robotsResponse = await fetchText(robotsUrl, timeoutMs)
-  if (robotsResponse.ok && robotsResponse.body) {
-    for (const line of robotsResponse.body.split(/\r?\n/)) {
+  const robotsTxt = robotsResponse.ok && robotsResponse.body ? robotsResponse.body : null
+
+  if (robotsTxt) {
+    for (const line of robotsTxt.split(/\r?\n/)) {
       const match = /^sitemap:\s*(.+)$/i.exec(line.trim())
       if (match) {
         sitemapCandidates.push(match[1].trim())
@@ -303,10 +428,14 @@ async function collectSitemapUrls(targetUrl: URL, timeoutMs: number): Promise<{ 
   return {
     sitemapUrls: Array.from(sitemapUrls),
     pageUrls: Array.from(pageUrls),
+    robotsTxt,
   }
 }
 
-async function fetchText(url: string, timeoutMs: number): Promise<{ ok: boolean; status: number; body: string | null }> {
+async function fetchText(
+  url: string,
+  timeoutMs: number,
+): Promise<{ ok: boolean; status: number; body: string | null; finalUrl: string | null }> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
@@ -323,12 +452,14 @@ async function fetchText(url: string, timeoutMs: number): Promise<{ ok: boolean;
       ok: response.ok,
       status: response.status,
       body: await response.text(),
+      finalUrl: response.url,
     }
   } catch {
     return {
       ok: false,
       status: 0,
       body: null,
+      finalUrl: null,
     }
   } finally {
     clearTimeout(timeout)
@@ -339,9 +470,28 @@ function parseHtmlPage(url: string, html: string, status: number): CrawledPage {
   const links = extractLinks(html, url)
   return {
     url,
-    title: extractTitle(html),
-    status,
-    links,
+        title: extractTitle(html),
+        status,
+        links,
+        facts: extractPageFacts(html),
+      }
+}
+
+function extractPageFacts(html: string): PageFacts {
+  return {
+    hasViewportMeta: /<meta\b[^>]*name\s*=\s*["']viewport["'][^>]*>/i.test(html),
+    jsonLdCount: countMatches(html, /<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>/gi),
+    hreflangCount: countMatches(html, /<link\b[^>]*rel\s*=\s*["'][^"']*alternate[^"']*["'][^>]*hreflang\s*=\s*["'][^"']+["'][^>]*>/gi),
+    canonicalHref: extractCanonicalHref(html),
+    metaDescription: extractMetaDescription(html),
+    openGraphTitle: extractMetaContent(html, 'property', 'og:title'),
+    openGraphDescription: extractMetaContent(html, 'property', 'og:description'),
+    twitterCard: extractMetaContent(html, 'name', 'twitter:card'),
+    h1Count: countMatches(html, /<h1\b[^>]*>/gi),
+    headingLevels: extractHeadingLevels(html),
+    imageCount: countMatches(html, /<img\b[^>]*>/gi),
+    missingAltCount: countMissingAltImages(html),
+    noindex: /<meta\b[^>]*name\s*=\s*["']robots["'][^>]*content\s*=\s*["'][^"']*noindex[^"']*["'][^>]*>/i.test(html),
   }
 }
 
@@ -391,12 +541,126 @@ function stripTags(value: string): string {
   return value.replace(/<[^>]+>/g, ' ')
 }
 
+function extractCanonicalHref(html: string): string | null {
+  const match = /<link\b[^>]*rel\s*=\s*["']canonical["'][^>]*href\s*=\s*["']([^"']+)["'][^>]*>/i.exec(html)
+  return match?.[1]?.trim() ?? null
+}
+
+function extractMetaDescription(html: string): string | null {
+  const match = /<meta\b[^>]*name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*>/i.exec(html)
+  return match?.[1]?.trim() ?? null
+}
+
+function extractMetaContent(html: string, attribute: 'name' | 'property', value: string): string | null {
+  const pattern = new RegExp(
+    `<meta\\b[^>]*${attribute}\\s*=\\s*["']${escapeRegExp(value)}["'][^>]*content\\s*=\\s*["']([^"']+)["'][^>]*>`,
+    'i',
+  )
+  const match = pattern.exec(html)
+  return match?.[1]?.trim() ?? null
+}
+
+function countMatches(value: string, pattern: RegExp): number {
+  return Array.from(value.matchAll(pattern)).length
+}
+
+function extractHeadingLevels(html: string): number[] {
+  const levels: number[] = []
+  for (const match of html.matchAll(/<h([1-6])\b[^>]*>/gi)) {
+    const level = Number(match[1])
+    if (!Number.isNaN(level)) {
+      levels.push(level)
+    }
+  }
+
+  return levels
+}
+
+function countMissingAltImages(html: string): number {
+  let missing = 0
+
+  for (const match of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = match[0] ?? ''
+    const altMatch = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag)
+    const alt = altMatch?.[1] ?? altMatch?.[2] ?? null
+
+    if (alt === null || alt.trim() === '') {
+      missing += 1
+    }
+  }
+
+  return missing
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function scoreToPercent(score: number | null | undefined): number {
   if (typeof score !== 'number') {
     return 0
   }
 
   return Math.round(score * 100)
+}
+
+function hashString(value: string): number {
+  let hash = 0
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0
+  }
+
+  return hash
+}
+
+function getWeakestAreaHeadline(scores: LighthouseScores): string {
+  const ordered = Object.entries(scores).sort((left, right) => left[1] - right[1])
+  const weakest = ordered[0]?.[0]
+
+  if (!weakest) {
+    return 'Audit completed with no Lighthouse data'
+  }
+
+  return `${weakest} is the weakest area`
+}
+
+function buildMockPriorities(scores: LighthouseScores, opportunities: string[]): AuditPriority[] {
+  const priorities: AuditPriority[] = []
+
+  if (scores.performance < 90) {
+    priorities.push({
+      title: 'Improve performance',
+      impact: 'Faster first load',
+      reason: 'Performance is below the target threshold in the mock audit.',
+    })
+  }
+
+  if (scores.accessibility < 90) {
+    priorities.push({
+      title: 'Improve accessibility',
+      impact: 'Better keyboard and screen reader support',
+      reason: 'Accessibility still has room to improve in the mock audit.',
+    })
+  }
+
+  if (scores.seo < 90) {
+    priorities.push({
+      title: 'Improve SEO signals',
+      impact: 'Clearer indexing and richer snippets',
+      reason: 'SEO scoring indicates there is still meaningful headroom.',
+    })
+  }
+
+  if (opportunities.length > 0 && priorities.length < 4) {
+    priorities.push({
+      title: 'Address Lighthouse opportunities',
+      impact: 'Reduce audit friction',
+      reason: opportunities.slice(0, 3).join(', '),
+    })
+  }
+
+  return priorities.slice(0, 4)
 }
 
 function metricValue(audit: { numericValue?: number | null } | undefined): number | null {
@@ -558,6 +822,388 @@ function summarizeHeuristically(input: {
     headline,
     summary,
     priorities: priorities.slice(0, 4),
+  }
+}
+
+function buildAuditSignals(crawl: CrawlResult): AuditSignal[] {
+  const rootPage = crawl.pages[0]
+  const facts = rootPage?.facts
+  const orphanCandidates = Math.max(0, crawl.discoveredUrls.length - crawl.pages.length)
+  const robotsStatus = inspectGptBotAccess(crawl.robotsTxt)
+  const titleLength = rootPage?.title.trim().length ?? 0
+  const metaDescriptionLength = facts?.metaDescription?.trim().length ?? 0
+  const canonicalStatus = inspectCanonicalHref(rootPage?.url ?? null, facts?.canonicalHref ?? null)
+  const h1Count = facts?.h1Count ?? 0
+  const sitemapCount = crawl.sitemapUrls.length
+  const failedUrlCount = crawl.failedUrls?.length ?? 0
+  const titleDuplicateCount = countDuplicateValues(crawl.pages.map((page) => page.title.trim()).filter(Boolean))
+  const metaDescriptionDuplicateCount = countDuplicateValues(
+    crawl.pages.map((page) => page.facts?.metaDescription?.trim() ?? '').filter(Boolean),
+  )
+  const headingStatus = inspectHeadingHierarchy(facts?.headingLevels ?? [])
+  const altStatus = inspectImageAltCoverage(facts?.imageCount ?? 0, facts?.missingAltCount ?? 0)
+  const openGraphTitleStatus = inspectPresence(
+    facts?.openGraphTitle,
+    'Open Graph title',
+    'No Open Graph title was found on the first crawled page.',
+  )
+  const openGraphDescriptionStatus = inspectPresence(
+    facts?.openGraphDescription,
+    'Open Graph description',
+    'No Open Graph description was found on the first crawled page.',
+  )
+  const twitterCardStatus = inspectPresence(
+    facts?.twitterCard,
+    'Twitter card',
+    'No Twitter card metadata was found on the first crawled page.',
+  )
+
+  return [
+    {
+      key: 'robots-gptbot',
+      label: 'GPTBot access',
+      status: robotsStatus.status,
+      detail: robotsStatus.detail,
+    },
+    {
+      key: 'sitemap-coverage',
+      label: 'Sitemap coverage',
+      status: sitemapCount > 0 ? 'pass' : 'warn',
+      detail:
+        sitemapCount > 0
+          ? `The crawl found ${sitemapCount} sitemap URL(s).`
+          : 'No sitemap URLs were discovered during the crawl.',
+    },
+    {
+      key: 'viewport-meta',
+      label: 'Viewport meta',
+      status: facts?.hasViewportMeta ? 'pass' : 'warn',
+      detail: facts?.hasViewportMeta
+        ? 'The landing page includes a responsive viewport tag.'
+        : 'No viewport meta tag was found on the first crawled page.',
+    },
+    {
+      key: 'page-title',
+      label: 'Page title',
+      status: titleLength >= 30 && titleLength <= 60 ? 'pass' : 'warn',
+      detail:
+        titleLength >= 30 && titleLength <= 60
+          ? `The first crawled page title is ${titleLength} characters long.`
+          : titleLength === 0
+            ? 'No page title was detected on the first crawled page.'
+            : `The first crawled page title is ${titleLength} characters long, which is outside the preferred range.`,
+    },
+    {
+      key: 'meta-description',
+      label: 'Meta description',
+      status: metaDescriptionLength >= 50 && metaDescriptionLength <= 160 ? 'pass' : 'warn',
+      detail:
+        metaDescriptionLength >= 50 && metaDescriptionLength <= 160
+          ? `The first crawled page has a ${metaDescriptionLength}-character meta description.`
+          : facts?.metaDescription
+            ? `The first crawled page meta description is ${metaDescriptionLength} characters long and should be reviewed.`
+            : 'No meta description was found on the first crawled page.',
+    },
+    {
+      key: 'duplicate-titles',
+      label: 'Duplicate titles',
+      status: titleDuplicateCount === 0 ? 'pass' : 'warn',
+      detail:
+        titleDuplicateCount === 0
+          ? 'No duplicate page titles were found in the current crawl.'
+          : `${titleDuplicateCount} duplicate page title group(s) were found across crawled pages.`,
+    },
+    {
+      key: 'duplicate-descriptions',
+      label: 'Duplicate descriptions',
+      status: metaDescriptionDuplicateCount === 0 ? 'pass' : 'warn',
+      detail:
+        metaDescriptionDuplicateCount === 0
+          ? 'No duplicate meta descriptions were found in the current crawl.'
+          : `${metaDescriptionDuplicateCount} duplicate meta description group(s) were found across crawled pages.`,
+    },
+    {
+      key: 'open-graph-title',
+      label: 'Open Graph title',
+      status: openGraphTitleStatus.status,
+      detail: openGraphTitleStatus.detail,
+    },
+    {
+      key: 'open-graph-description',
+      label: 'Open Graph description',
+      status: openGraphDescriptionStatus.status,
+      detail: openGraphDescriptionStatus.detail,
+    },
+    {
+      key: 'twitter-card',
+      label: 'Twitter card',
+      status: twitterCardStatus.status,
+      detail: twitterCardStatus.detail,
+    },
+    {
+      key: 'json-ld',
+      label: 'JSON-LD schema',
+      status: (facts?.jsonLdCount ?? 0) > 0 ? 'pass' : 'warn',
+      detail:
+        (facts?.jsonLdCount ?? 0) > 0
+          ? `${facts?.jsonLdCount ?? 0} structured data block(s) found on the first crawled page.`
+          : 'No JSON-LD blocks were detected on the first crawled page.',
+    },
+    {
+      key: 'hreflang',
+      label: 'hreflang links',
+      status: (facts?.hreflangCount ?? 0) > 0 ? 'pass' : 'warn',
+      detail:
+        (facts?.hreflangCount ?? 0) > 0
+          ? `${facts?.hreflangCount ?? 0} hreflang link(s) were found on the first crawled page.`
+          : 'No hreflang links were found on the first crawled page.',
+    },
+    {
+      key: 'canonical-url',
+      label: 'Canonical URL',
+      status: canonicalStatus.status,
+      detail: canonicalStatus.detail,
+    },
+    {
+      key: 'h1-heading',
+      label: 'H1 heading',
+      status: h1Count === 1 ? 'pass' : h1Count === 0 ? 'fail' : 'warn',
+      detail:
+        h1Count === 1
+          ? 'The first crawled page has a single H1 heading.'
+          : h1Count === 0
+            ? 'No H1 heading was found on the first crawled page.'
+            : `The first crawled page has ${h1Count} H1 headings.`,
+    },
+    {
+      key: 'heading-structure',
+      label: 'Heading structure',
+      status: headingStatus.status,
+      detail: headingStatus.detail,
+    },
+    {
+      key: 'image-alt',
+      label: 'Image alt text',
+      status: altStatus.status,
+      detail: altStatus.detail,
+    },
+    {
+      key: 'noindex',
+      label: 'Indexability',
+      status: facts?.noindex ? 'fail' : 'pass',
+      detail: facts?.noindex
+        ? 'The first crawled page contains a noindex directive.'
+        : 'The first crawled page does not contain a noindex directive.',
+    },
+    {
+      key: 'orphan-candidates',
+      label: 'Orphan candidates',
+      status: orphanCandidates === 0 ? 'pass' : 'warn',
+      detail:
+        orphanCandidates === 0
+          ? 'All discovered URLs were covered by the current crawl pass.'
+          : `${orphanCandidates} discovered URL(s) were not crawled in this pass and should be reviewed.`,
+    },
+    {
+      key: 'redirects',
+      label: 'Redirects',
+      status: (crawl.redirectedUrls?.length ?? 0) === 0 ? 'pass' : 'warn',
+      detail:
+        (crawl.redirectedUrls?.length ?? 0) === 0
+          ? 'No redirects were encountered during the crawl.'
+          : `${crawl.redirectedUrls?.length ?? 0} URL(s) redirected during the crawl.`,
+    },
+    {
+      key: 'broken-urls',
+      label: 'Broken URLs',
+      status: failedUrlCount === 0 ? 'pass' : 'fail',
+      detail:
+        failedUrlCount === 0
+          ? 'No failed fetches were encountered during the crawl.'
+          : `${failedUrlCount} URL(s) failed to load during the crawl.`,
+    },
+  ]
+}
+
+function countDuplicateValues(values: string[]): number {
+  const counts = new Map<string, number>()
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1)
+  }
+
+  return Array.from(counts.values()).filter((count) => count > 1).length
+}
+
+function inspectPresence(
+  value: string | null | undefined,
+  label: string,
+  missingDetail: string,
+): { status: AuditSignalStatus; detail: string } {
+  if (!value || !value.trim()) {
+    return {
+      status: 'warn',
+      detail: missingDetail,
+    }
+  }
+
+  return {
+    status: 'pass',
+    detail: `${label} was found on the first crawled page.`,
+  }
+}
+
+function inspectHeadingHierarchy(levels: number[]): { status: AuditSignalStatus; detail: string } {
+  if (levels.length === 0) {
+    return {
+      status: 'warn',
+      detail: 'No headings were detected on the first crawled page.',
+    }
+  }
+
+  if (levels[0] !== 1) {
+    return {
+      status: 'warn',
+      detail: `The first heading on the page is H${levels[0]}, not H1.`,
+    }
+  }
+
+  for (let index = 1; index < levels.length; index += 1) {
+    if (levels[index] - levels[index - 1] > 1) {
+      return {
+        status: 'warn',
+        detail: `The heading structure skips from H${levels[index - 1]} to H${levels[index]}.`,
+      }
+    }
+  }
+
+  return {
+    status: 'pass',
+    detail: `The page uses a sensible heading structure across ${levels.length} headings.`,
+  }
+}
+
+function inspectImageAltCoverage(imageCount: number, missingAltCount: number): { status: AuditSignalStatus; detail: string } {
+  if (imageCount === 0) {
+    return {
+      status: 'pass',
+      detail: 'No images were found on the first crawled page.',
+    }
+  }
+
+  if (missingAltCount === 0) {
+    return {
+      status: 'pass',
+      detail: `All ${imageCount} image(s) on the first crawled page have alt text.`,
+    }
+  }
+
+  return {
+    status: 'warn',
+    detail: `${missingAltCount} of ${imageCount} image(s) on the first crawled page are missing alt text.`,
+  }
+}
+
+function inspectCanonicalHref(targetUrl: string | null, canonicalHref: string | null): { status: AuditSignalStatus; detail: string } {
+  if (!targetUrl) {
+    return {
+      status: 'warn',
+      detail: 'The canonical URL could not be evaluated because no crawled page was available.',
+    }
+  }
+
+  if (!canonicalHref) {
+    return {
+      status: 'warn',
+      detail: 'No canonical link element was found on the first crawled page.',
+    }
+  }
+
+  try {
+    const resolvedCanonical = new URL(canonicalHref, targetUrl).href
+    const normalizedTarget = new URL(targetUrl).href
+
+    if (resolvedCanonical === normalizedTarget) {
+      return {
+        status: 'pass',
+        detail: `The canonical URL matches the crawled page: ${resolvedCanonical}.`,
+      }
+    }
+
+    return {
+      status: 'warn',
+      detail: `The canonical URL resolves to ${resolvedCanonical}, which does not match the crawled page ${normalizedTarget}.`,
+    }
+  } catch {
+    return {
+      status: 'warn',
+      detail: `The canonical URL "${canonicalHref}" could not be resolved against the crawled page.`,
+    }
+  }
+}
+
+function inspectGptBotAccess(robotsTxt: string | null | undefined): { status: AuditSignalStatus; detail: string } {
+  if (!robotsTxt) {
+    return {
+      status: 'warn',
+      detail: 'No robots.txt file was found, so GPTBot access could not be confirmed.',
+    }
+  }
+
+  const lines = robotsTxt.split(/\r?\n/)
+  let currentAgents: string[] = []
+  let gptBotDecision: 'allow' | 'disallow' | null = null
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim()
+
+    if (!line || line.startsWith('#')) {
+      currentAgents = []
+      continue
+    }
+
+    const userAgentMatch = /^user-agent:\s*(.+)$/i.exec(line)
+    if (userAgentMatch) {
+      currentAgents.push(userAgentMatch[1].trim().toLowerCase())
+      continue
+    }
+
+    const ruleMatch = /^(allow|disallow):\s*(.*)$/i.exec(line)
+    if (!ruleMatch) {
+      continue
+    }
+
+    if (!currentAgents.includes('gptbot')) {
+      continue
+    }
+
+    const rule = ruleMatch[1].toLowerCase()
+    const value = ruleMatch[2].trim()
+
+    if (value === '/') {
+      gptBotDecision = rule === 'allow' ? 'allow' : 'disallow'
+    }
+  }
+
+  if (gptBotDecision === 'allow') {
+    return {
+      status: 'pass',
+      detail: 'robots.txt explicitly allows GPTBot access.',
+    }
+  }
+
+  if (gptBotDecision === 'disallow') {
+    return {
+      status: 'warn',
+      detail: 'robots.txt explicitly blocks GPTBot access.',
+    }
+  }
+
+  const hasGptBotGroup = /user-agent:\s*gptbot/i.test(robotsTxt)
+  return {
+    status: hasGptBotGroup ? 'warn' : 'warn',
+    detail: hasGptBotGroup
+      ? 'robots.txt mentions GPTBot, but no explicit allow or disallow rule was detected.'
+      : 'robots.txt does not mention GPTBot explicitly.',
   }
 }
 

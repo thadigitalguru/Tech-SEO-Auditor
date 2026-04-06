@@ -2,7 +2,7 @@ import { auth } from '@clerk/nextjs/server'
 import { NextResponse } from 'next/server'
 
 import { evaluateAuditScoreAlerts } from '@/lib/alert-engine'
-import { auditSite } from '@/lib/audit-engine'
+import { auditSite, createMockAuditReport } from '@/lib/audit-engine'
 import { saveAuditReport } from '@/lib/audit-store'
 
 export const runtime = 'nodejs'
@@ -18,11 +18,7 @@ export async function POST(request: Request) {
 
     const report =
       process.env.AUDIT_E2E_MODE === '1'
-        ? await auditSite(url, {
-            maxPages: 1,
-            crawlTimeoutMs: 5_000,
-            lighthouseTimeoutMs: 45_000,
-          })
+        ? createMockAuditReport(url)
         : await auditSite(url)
     const { userId } = await auth()
     const audit = await saveAuditReport(report, userId ?? null)

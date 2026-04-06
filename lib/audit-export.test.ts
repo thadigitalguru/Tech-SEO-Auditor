@@ -38,6 +38,20 @@ const audit: StoredAudit = {
       summary: 'A short summary',
       priorities: [],
     },
+    signals: [
+      {
+        key: 'viewport-meta',
+        label: 'Viewport meta',
+        status: 'pass',
+        detail: 'The landing page includes a responsive viewport tag.',
+      },
+      {
+        key: 'twitter-card',
+        label: 'Twitter card',
+        status: 'pass',
+        detail: 'Twitter card metadata was found on the first crawled page.',
+      },
+    ],
     generatedAt: '2026-04-05T12:00:00Z',
   },
 }
@@ -53,6 +67,8 @@ describe('audit export helpers', () => {
 
     expect(csv).toContain('targetUrl,https://example.com/')
     expect(csv).toContain('performance,88')
+    expect(csv).toContain('signals,Viewport meta:pass')
+    expect(csv).toContain('Twitter card:pass')
     expect(csv).toContain('inp,')
   })
 })

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createAuditSite, type CrawlResult, type LighthouseAudit } from './audit-engine'
+import { createAuditSite, createMockAuditReport, type CrawlResult, type LighthouseAudit } from './audit-engine'
 
 describe('createAuditSite', () => {
   it('threads crawl and lighthouse results into a final report', async () => {
@@ -68,5 +68,42 @@ describe('createAuditSite', () => {
     expect(report.lighthouse.scores.performance).toBe(72)
     expect(report.summary.source).toBe('heuristic')
     expect(report.summary.priorities[0]?.title).toBe('Improve performance')
+    expect(report.signals).toHaveLength(20)
+    expect(report.signals?.[0]?.label).toBe('GPTBot access')
+  })
+
+  it('creates a deterministic mock report for e2e mode', () => {
+    const report = createMockAuditReport('https://example.com/audit-target?run=123')
+
+    expect(report.targetUrl).toBe('https://example.com/audit-target?run=123')
+    expect(report.crawl.pages).toHaveLength(1)
+    expect(report.lighthouse.scores.performance).toBeGreaterThan(0)
+    expect(report.summary.priorities.length).toBeGreaterThan(0)
+    expect(report.signals).toHaveLength(20)
+    expect(report.signals?.every((signal) => signal.status === 'pass' || signal.status === 'warn')).toBe(true)
+    expect(report.signals?.map((signal) => signal.label)).toEqual(
+      expect.arrayContaining([
+        'GPTBot access',
+        'Viewport meta',
+        'Page title',
+        'Meta description',
+        'Duplicate titles',
+        'Duplicate descriptions',
+        'Sitemap coverage',
+        'Open Graph title',
+        'Open Graph description',
+        'Twitter card',
+        'JSON-LD schema',
+        'hreflang links',
+        'Canonical URL',
+        'H1 heading',
+        'Heading structure',
+        'Image alt text',
+        'Indexability',
+        'Orphan candidates',
+        'Redirects',
+        'Broken URLs',
+      ]),
+    )
   })
 })

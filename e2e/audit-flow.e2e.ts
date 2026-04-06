@@ -31,7 +31,7 @@ test.describe('audit flow', () => {
     await expect(page.getByText(/^Performance$/)).toBeVisible()
     await expect(page.getByText(/^Accessibility$/)).toBeVisible()
     await expect(page.getByRole('heading', { name: /priorities/i })).toBeVisible()
-    await expect(page.getByRole('heading', { name: /signals/i })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Signals', exact: true })).toBeVisible()
 
     await page.getByRole('combobox', { name: /drop threshold/i }).selectOption('3')
     await page.getByRole('textbox', { name: /delivery target/i }).fill(

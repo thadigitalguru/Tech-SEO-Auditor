@@ -19,6 +19,18 @@ function formatMetric(value: number | null) {
   return value === null ? 'n/a' : value.toString()
 }
 
+function signalTone(status: 'pass' | 'warn' | 'fail') {
+  if (status === 'pass') {
+    return 'border-emerald-300/30 bg-emerald-400/10 text-emerald-200'
+  }
+
+  if (status === 'fail') {
+    return 'border-rose-300/30 bg-rose-400/10 text-rose-200'
+  }
+
+  return 'border-amber-300/30 bg-amber-400/10 text-amber-200'
+}
+
 export default async function AuditPage({
   params,
 }: {
@@ -220,32 +232,51 @@ export default async function AuditPage({
 
           <article className="rounded-3xl border border-white/10 bg-white/5 p-6">
             <h2 className="text-xl font-semibold text-white">Signals</h2>
-            <dl className="mt-5 space-y-4 text-sm">
-              <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                <dt className="text-slate-400">Pages crawled</dt>
-                <dd className="font-medium text-white">{report.crawl.pages.length}</dd>
+            <div className="mt-5 space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl bg-slate-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">Pages crawled</p>
+                  <p className="mt-2 text-2xl font-semibold text-white">{report.crawl.pages.length}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">Internal URLs discovered</p>
+                  <p className="mt-2 text-2xl font-semibold text-white">{report.crawl.discoveredUrls.length}</p>
+                </div>
               </div>
-              <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                <dt className="text-slate-400">Internal URLs discovered</dt>
-                <dd className="font-medium text-white">{report.crawl.discoveredUrls.length}</dd>
+
+              <div className="space-y-3">
+                {(report.signals ?? []).map((signal) => (
+                  <div key={signal.key} className="rounded-2xl bg-slate-950/60 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-white">{signal.label}</h3>
+                      <span className={`rounded-full border px-3 py-1 text-xs uppercase tracking-[0.2em] ${signalTone(signal.status)}`}>
+                        {signal.status}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-slate-300">{signal.detail}</p>
+                  </div>
+                ))}
               </div>
-              <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                <dt className="text-slate-400">LCP</dt>
-                <dd className="font-medium text-white">{formatMetric(report.lighthouse.metrics.lcp)}</dd>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl bg-slate-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">LCP</p>
+                  <p className="mt-2 text-2xl font-semibold text-white">{formatMetric(report.lighthouse.metrics.lcp)}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">CLS</p>
+                  <p className="mt-2 text-2xl font-semibold text-white">{formatMetric(report.lighthouse.metrics.cls)}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">INP</p>
+                  <p className="mt-2 text-2xl font-semibold text-white">{formatMetric(report.lighthouse.metrics.inp)}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.24em] text-slate-400">TBT</p>
+                  <p className="mt-2 text-2xl font-semibold text-white">{formatMetric(report.lighthouse.metrics.tbt)}</p>
+                </div>
               </div>
-              <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                <dt className="text-slate-400">CLS</dt>
-                <dd className="font-medium text-white">{formatMetric(report.lighthouse.metrics.cls)}</dd>
-              </div>
-              <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                <dt className="text-slate-400">INP</dt>
-                <dd className="font-medium text-white">{formatMetric(report.lighthouse.metrics.inp)}</dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-slate-400">TBT</dt>
-                <dd className="font-medium text-white">{formatMetric(report.lighthouse.metrics.tbt)}</dd>
-              </div>
-            </dl>
+            </div>
           </article>
         </div>
       </section>

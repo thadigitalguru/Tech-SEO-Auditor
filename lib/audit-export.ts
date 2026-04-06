@@ -25,6 +25,7 @@ export function serializeAuditAsCsv(audit: StoredAudit) {
     ['pagesCrawled', String(report.crawl.pages.length)],
     ['discoveredUrls', String(report.crawl.discoveredUrls.length)],
     ['priorities', report.summary.priorities.map((priority) => priority.title).join(' | ')],
+    ['signals', (report.signals ?? []).map((signal) => `${signal.label}:${signal.status}`).join(' | ')],
   ]
 
   return rows
