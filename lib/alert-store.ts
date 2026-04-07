@@ -212,7 +212,9 @@ export async function recordScoreDropAlerts(
 
   const recentEvents = await getScoreAlertEventsForRuleId(rule.id, userId, 20)
   const draftedEvents = triggered
-    .filter((comparison) => !shouldSkipEvent(rule, comparison.metricKey, audit.id, recentEvents))
+    .filter((comparison) =>
+      !shouldSkipEvent(rule, comparison.metricKey, audit.id, audit.createdAt, recentEvents),
+    )
     .map((comparison) => ({
     id: cryptoRandomId(),
     ruleId: rule.id,
@@ -621,9 +623,11 @@ function shouldSkipEvent(
   rule: ScoreAlertRule,
   metricKey: ScoreMetricKey,
   auditId: string,
+  currentAuditTime: Date,
   events: ScoreAlertEvent[],
 ) {
   const cooldownMs = rule.cooldownHours * 60 * 60 * 1000
+  const currentTime = currentAuditTime.getTime()
 
   return events.some((event) => {
     if (event.metricKey !== metricKey) {
@@ -638,6 +642,6 @@ function shouldSkipEvent(
       return false
     }
 
-    return Date.now() - event.createdAt.getTime() < cooldownMs
+    return currentTime - event.createdAt.getTime() < cooldownMs
   })
 }
